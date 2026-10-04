@@ -22,9 +22,9 @@ import (
 func TestEnsureClusterCredentialsDoesNotUseGKEForEKS(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	cfg := &Config{
-		Platform:       PlatformEKS,
-		ProjectID:      "gke-project",
-		ClusterName:    "gke-cluster",
+		Platform:        PlatformEKS,
+		ProjectID:       "gke-project",
+		ClusterName:     "gke-cluster",
 		ClusterLocation: "us-east1",
 	}
 	if err := cfg.EnsureClusterCredentials(context.Background()); err != nil {

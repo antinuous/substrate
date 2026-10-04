@@ -215,8 +215,8 @@ func TestLoadPlatformRequirements(t *testing.T) {
 		{
 			name: "AKS requires explicit issuer",
 			env: map[string]string{
-				"ATE_PLATFORM":  PlatformAKS,
-				"ATE_S3_REGION": "us-east-1",
+				"ATE_PLATFORM":    PlatformAKS,
+				"ATE_S3_REGION":   "us-east-1",
 				"ATE_S3_ROLE_ARN": "arn:aws:iam::123456789012:role/aks",
 			},
 			want: "--expected-jwt-issuer is required",

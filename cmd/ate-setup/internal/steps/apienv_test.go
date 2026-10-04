@@ -471,8 +471,8 @@ func TestCreateAPIServerEnvVarsExternalMySQLSecret(t *testing.T) {
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: SecretAPIEnvVars, Namespace: NamespaceAteSystem},
 				Data: map[string][]byte{
-					envStoreBackend:                                  []byte(config.StoreBackendMySQL),
-					"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING":      []byte("sensitive-marker"),
+					envStoreBackend: []byte(config.StoreBackendMySQL),
+					"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING": []byte("sensitive-marker"),
 				},
 			},
 			wantError: "ATE_API_MYSQL_OWNER_CONNECTION_STRING",
@@ -482,7 +482,7 @@ func TestCreateAPIServerEnvVarsExternalMySQLSecret(t *testing.T) {
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: SecretAPIEnvVars, Namespace: NamespaceAteSystem},
 				Data: map[string][]byte{
-					envStoreBackend:                             []byte(config.StoreBackendMySQL),
+					envStoreBackend: []byte(config.StoreBackendMySQL),
 					"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING": []byte("read-write-dsn"),
 					"ATE_API_MYSQL_OWNER_CONNECTION_STRING":      []byte("owner-dsn"),
 				},

@@ -136,9 +136,9 @@ func TestBuildAuthenticationConfig(t *testing.T) {
 func TestJWTIssuerRequiresExplicitNonGKEIssuer(t *testing.T) {
 	for _, platform := range []string{config.PlatformEKS, config.PlatformAKS} {
 		e := &Env{Cfg: &config.Config{
-			Platform:       platform,
-			ProjectID:      "gke-project",
-			ClusterName:    "gke-cluster",
+			Platform:        platform,
+			ProjectID:       "gke-project",
+			ClusterName:     "gke-cluster",
 			ClusterLocation: "us-east1",
 		}}
 		if got := e.jwtIssuer(context.Background()); got != "" {
