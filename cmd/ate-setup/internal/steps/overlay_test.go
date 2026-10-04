@@ -16,7 +16,9 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -24,8 +26,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
@@ -694,6 +701,121 @@ func TestPlatformInstallOverlays(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyStorageConfig(t *testing.T) {
+	const (
+		region  = "us-east-1"
+		roleARN = "arn:aws:iam::123456789012:role/substrate"
+	)
+	wantData := map[string]string{
+		"ATE_STORAGE_BACKEND":         "s3",
+		"AWS_REGION":                  region,
+		"AWS_ROLE_ARN":                roleARN,
+		"AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/sts.amazonaws.com/serviceaccount/token",
+	}
+	atelet := func(name, app string) *appsv1.DaemonSet {
+		return &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: NamespaceAteSystem,
+				Name:      name,
+				Labels:    map[string]string{"app": app},
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		name        string
+		existing    map[string]string
+		wantRestart bool
+	}{
+		{name: "first creation"},
+		{name: "unchanged", existing: wantData},
+		{name: "changed", existing: map[string]string{"ATE_STORAGE_BACKEND": "s3", "AWS_REGION": "us-west-2"}, wantRestart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var existing *corev1.ConfigMap
+			if tc.existing != nil {
+				existing = &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: storageConfigMap},
+					Data:       tc.existing,
+				}
+			}
+			objects := []runtime.Object{
+				apiServerDeployment(),
+				atelet("atelet-v1-2-3", "atelet"),
+				atelet("atelet-v1-2-2", "atelet"),
+				atelet("other-daemonset", "other"),
+			}
+			if existing != nil {
+				objects = append(objects, existing)
+			}
+			clientset := fake.NewSimpleClientset(objects...)
+			clientset.PrependReactor("patch", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+				patchAction, ok := action.(ktesting.PatchAction)
+				if !ok || patchAction.GetPatchType() != types.ApplyPatchType {
+					return false, nil, nil
+				}
+				var cm corev1.ConfigMap
+				if err := json.Unmarshal(patchAction.GetPatch(), &cm); err != nil {
+					return true, nil, err
+				}
+				gvr := corev1.SchemeGroupVersion.WithResource("configmaps")
+				if _, err := clientset.Tracker().Get(gvr, action.GetNamespace(), patchAction.GetName()); err == nil {
+					return false, nil, nil
+				} else if !apierrors.IsNotFound(err) {
+					return true, nil, err
+				}
+				if err := clientset.Tracker().Create(gvr, &cm, action.GetNamespace()); err != nil {
+					return true, nil, err
+				}
+				return true, &cm, nil
+			})
+			e := &Env{
+				Cfg:  &config.Config{Platform: config.PlatformAKS, S3Region: region, S3RoleARN: roleARN},
+				Kube: &kube.Client{Typed: clientset},
+			}
+
+			if err := e.applyStorageConfig(t.Context()); err != nil {
+				t.Fatalf("applyStorageConfig() error = %v", err)
+			}
+			cm, err := e.Kube.GetConfigMap(t.Context(), NamespaceAteSystem, storageConfigMap)
+			if err != nil {
+				t.Fatalf("GetConfigMap() error = %v", err)
+			}
+			if cm == nil || !maps.Equal(cm.Data, wantData) {
+				t.Errorf("storage ConfigMap data = %v, want %v", cm, wantData)
+			}
+			for _, workload := range []struct {
+				kind string
+				name string
+			}{
+				{kind: "deployment", name: "ate-api-server"},
+				{kind: "daemonset", name: "atelet-v1-2-3"},
+				{kind: "daemonset", name: "atelet-v1-2-2"},
+			} {
+				if got := restartedAt(t, e, workload.kind, workload.name); got != tc.wantRestart {
+					t.Errorf("%s/%s restarted = %v, want %v", workload.kind, workload.name, got, tc.wantRestart)
+				}
+			}
+			if restartedAt(t, e, "daemonset", "other-daemonset") {
+				t.Error("a DaemonSet outside app=atelet was restarted")
+			}
+		})
+	}
+
+	t.Run("changed without consumers", func(t *testing.T) {
+		e := &Env{
+			Cfg: &config.Config{Platform: config.PlatformAKS, S3Region: region, S3RoleARN: roleARN},
+			Kube: fakeKube(t, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: storageConfigMap},
+				Data:       map[string]string{"AWS_REGION": "us-west-2"},
+			}),
+		}
+		if err := e.applyStorageConfig(t.Context()); err != nil {
+			t.Fatalf("applyStorageConfig() error = %v", err)
+		}
+	})
 }
 
 func TestApplyPlatformConfigMaps(t *testing.T) {

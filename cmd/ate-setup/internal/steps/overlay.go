@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -454,7 +455,31 @@ func (e *Env) applyStorageConfig(ctx context.Context) error {
 		data["AWS_ROLE_ARN"] = e.Cfg.S3RoleARN
 		data["AWS_WEB_IDENTITY_TOKEN_FILE"] = "/var/run/secrets/sts.amazonaws.com/serviceaccount/token"
 	}
-	return e.Kube.ApplyConfigMap(ctx, e.Namespace(), storageConfigMap, data)
+	existing, err := e.Kube.GetConfigMap(ctx, e.Namespace(), storageConfigMap)
+	if err != nil {
+		return err
+	}
+	if err := e.Kube.ApplyConfigMap(ctx, e.Namespace(), storageConfigMap, data); err != nil {
+		return err
+	}
+	if existing == nil || maps.Equal(existing.Data, data) {
+		return nil
+	}
+
+	now := time.Now()
+	if err := e.Kube.RolloutRestartDeployment(ctx, e.Namespace(), "ate-api-server", now); err != nil {
+		return err
+	}
+	daemonSets, err := e.Kube.DaemonSetNames(ctx, e.Namespace(), "app=atelet")
+	if err != nil {
+		return err
+	}
+	for _, name := range daemonSets {
+		if err := e.Kube.RolloutRestart(ctx, e.Namespace(), name, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // otelConfigMap is the ConfigMap every control plane component reads its
