@@ -267,6 +267,11 @@ func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfigurat
 		fieldRefEnv("POD_UID", "metadata.uid"),
 	}
 	if otel.Endpoint == "" {
+		envs = append(envs,
+			corev1ac.EnvVar().WithName("OTEL_TRACES_EXPORTER").WithValue("none"),
+			corev1ac.EnvVar().WithName("OTEL_METRICS_EXPORTER").WithValue("none"),
+			corev1ac.EnvVar().WithName("OTEL_LOGS_EXPORTER").WithValue("none"),
+		)
 		return envs
 	}
 	envs = append(envs,
