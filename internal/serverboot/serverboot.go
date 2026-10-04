@@ -188,11 +188,13 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 		// WithInsecure above is inert on this path.
 		expOpts = append(expOpts, otlptracegrpc.WithGRPCConn(opts.ExporterConn))
 	}
-	exporter, err := otlptracegrpc.New(ctx, expOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create OTLP exporter: %w", err)
+	if strings.ToLower(strings.TrimSpace(os.Getenv(tracesExporterEnv))) != "none" {
+		exporter, err := otlptracegrpc.New(ctx, expOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP exporter: %w", err)
+		}
+		tpOpts = append(tpOpts, sdktrace.WithBatcher(exporter))
 	}
-	tpOpts = append(tpOpts, sdktrace.WithBatcher(exporter))
 
 	tp := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tp)
@@ -202,6 +204,7 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 }
 
 const metricsExporterEnv = "OTEL_METRICS_EXPORTER"
+const tracesExporterEnv = "OTEL_TRACES_EXPORTER"
 
 // metricsPushEnabled applies OTEL_METRICS_EXPORTER: otlp, the default, or none,
 // which drops the OTLP reader for a component whose metrics are scraped

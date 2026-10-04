@@ -24,6 +24,11 @@ a pre-scan pass, so they may appear anywhere on its command line.
 | `ate-setup` | `hack/install-ate.sh` | Notes |
 |---|---|---|
 | `--kind` | `hack/install-ate-kind.sh`, or `ATE_INSTALL_KIND=true` | Kind overlays, the local registry, and host-architecture image builds |
+| `--platform gke\|eks\|aks` | n/a | Kubernetes platform (default `gke`, or `ATE_PLATFORM`); `--kind` requires GKE |
+| `--expected-jwt-issuer URL` | n/a | JWT issuer trusted by ate-api-server; required for EKS and AKS, or set `EXPECTED_JWT_ISSUER` |
+| `--s3-region REGION` | n/a | Region for S3 snapshots; required for EKS and AKS, or set `ATE_S3_REGION` |
+| `--s3-role-arn ARN` | n/a | AKS workload-identity role; required for AKS, or set `ATE_S3_ROLE_ARN` |
+| `--external-store-secret` | n/a | Use the existing MySQL Secret without writing it or passing DSNs; set `ATE_EXTERNAL_STORE_SECRET=true` |
 | `--atenet-dataplane envoy\|agentgateway` | `--atenet-dataplane envoy\|agentgateway` | atenet ingress and egress dataplane (default `envoy`) |
 | `--rollout-timeout DURATION` | `--rollout-timeout DURATION` | Readiness timeout for workloads (default `60s`). Unlike the shell flag it also governs the podcertificate-controller and CSI waits, which stay at their 120s default until it is passed |
 | `--podcert-workers-per-signer N` | `--podcert-workers-per-signer N` | Concurrent workers per podcertificate-controller signer |
@@ -41,6 +46,10 @@ a pre-scan pass, so they may appear anywhere on its command line.
 
 Both have an environment equivalent, read when the flag is absent:
 `ATE_IMAGE_REPO` and `ATE_IMAGE_TAG`.
+
+`PROJECT_ID`, `CLUSTER_NAME`, and `CLUSTER_LOCATION` configure GKE credentials
+and derive the GKE JWT issuer. They are not issuer inputs for EKS or AKS,
+which require `EXPECTED_JWT_ISSUER`.
 
 ## Installing a release
 

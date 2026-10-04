@@ -32,7 +32,7 @@ import (
 // anything talks to the cluster. Setting a context (or KUBECTL_CONTEXT) is
 // taken as "I already have credentials" and skips the call, as it did there.
 func (c *Config) EnsureClusterCredentials(ctx context.Context) error {
-	if c.Kind || c.Context != "" || c.ProjectID == "" {
+	if c.Kind || (c.Platform != "" && c.Platform != PlatformGKE) || c.Context != "" || c.ProjectID == "" {
 		return nil
 	}
 	if c.ClusterName == "" || c.ClusterLocation == "" {

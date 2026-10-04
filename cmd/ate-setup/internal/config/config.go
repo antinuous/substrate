@@ -42,6 +42,10 @@ const (
 	RouterEnvoy        = "envoy"
 	RouterAgentgateway = "agentgateway"
 
+	PlatformGKE = "gke"
+	PlatformEKS = "eks"
+	PlatformAKS = "aks"
+
 	SandboxClassGvisor  = "gvisor"
 	SandboxClassMicrovm = "microvm"
 
@@ -98,6 +102,8 @@ type Config struct {
 
 	// Kind selects the local Kind install profile (ATE_INSTALL_KIND).
 	Kind bool
+	// Platform selects the Kubernetes platform for installation (ATE_PLATFORM).
+	Platform string
 
 	// Namespace is the namespace the control plane is installed into, from
 	// ATE_NAMESPACE. It defaults to the canonical installdefaults.SystemNamespace,
@@ -116,17 +122,24 @@ type Config struct {
 	Kubeconfig string
 	Context    string
 
-	// GKE cluster coordinates, used to fetch credentials and to derive the
+	// GKE cluster coordinates, used to fetch credentials and derive the GKE
 	// service account JWT issuer.
 	ProjectID       string
 	ClusterName     string
 	ClusterLocation string
 
 	// ExpectedJWTIssuer is the service account token issuer ate-api-server
-	// trusts (EXPECTED_JWT_ISSUER). It overrides both the GKE derivation from
-	// the coordinates above and OpenID discovery, for clusters whose issuer
-	// follows neither form.
+	// trusts (EXPECTED_JWT_ISSUER). It overrides GKE derivation from the
+	// coordinates above and is required for EKS and AKS.
 	ExpectedJWTIssuer string
+
+	// S3Region is the AWS region used for snapshots (ATE_S3_REGION).
+	S3Region string
+	// S3RoleARN is the web-identity role assumed by AKS workloads
+	// (ATE_S3_ROLE_ARN).
+	S3RoleARN string
+	// ExternalStoreSecret selects a pre-created API Secret for MySQL credentials.
+	ExternalStoreSecret bool
 
 	// BucketName is the snapshot bucket demos are templated with.
 	BucketName string
@@ -273,6 +286,7 @@ type CloudSQLConfig struct {
 // defaulting and validation.
 type Options struct {
 	Kind                           bool
+	Platform                       string
 	Kubeconfig                     string
 	Context                        string
 	Router                         string
@@ -283,6 +297,10 @@ type Options struct {
 	AdditionalEgressExtprocService string
 	CredentialProvider             string
 	OtlpEndpoint                   string
+	ExpectedJWTIssuer              string
+	S3Region                       string
+	S3RoleARN                      string
+	ExternalStoreSecret            bool
 
 	// Image source selection.
 	ImageRepo string
@@ -324,6 +342,14 @@ func Load(opts Options) (*Config, error) {
 				}
 			}
 		}
+	}
+	externalStoreSecret := opts.ExternalStoreSecret || env["ATE_EXTERNAL_STORE_SECRET"] == "true"
+	platform := firstNonEmpty(opts.Platform, env["ATE_PLATFORM"], PlatformGKE)
+	storeBackend := firstNonEmpty(env["ATE_API_STORE_BACKEND"], StoreBackendPostgres)
+	storeBackendSet := env["ATE_API_STORE_BACKEND"] != ""
+	if externalStoreSecret && !storeBackendSet {
+		storeBackend = StoreBackendMySQL
+		storeBackendSet = true
 	}
 
 	timeoutStr := firstNonEmpty(opts.RolloutTimeout, env["ATE_INSTALL_ROLLOUT_TIMEOUT"])
@@ -371,19 +397,23 @@ func Load(opts Options) (*Config, error) {
 	cfg := &Config{
 		Root:                              root,
 		Kind:                              kind,
+		Platform:                          platform,
 		Namespace:                         firstNonEmpty(env["ATE_NAMESPACE"], installdefaults.SystemNamespace),
 		Kubeconfig:                        kubeconfig,
 		Context:                           firstNonEmpty(opts.Context, env["KUBECTL_CONTEXT"]),
 		ProjectID:                         env["PROJECT_ID"],
 		ClusterName:                       env["CLUSTER_NAME"],
 		ClusterLocation:                   env["CLUSTER_LOCATION"],
-		ExpectedJWTIssuer:                 env["EXPECTED_JWT_ISSUER"],
+		ExpectedJWTIssuer:                 firstNonEmpty(opts.ExpectedJWTIssuer, env["EXPECTED_JWT_ISSUER"]),
+		S3Region:                          firstNonEmpty(opts.S3Region, env["ATE_S3_REGION"]),
+		S3RoleARN:                         firstNonEmpty(opts.S3RoleARN, env["ATE_S3_ROLE_ARN"]),
+		ExternalStoreSecret:               externalStoreSecret,
 		BucketName:                        env["BUCKET_NAME"],
 		KODockerRepo:                      env["KO_DOCKER_REPO"],
 		KODefaultPlatforms:                env["KO_DEFAULTPLATFORMS"],
 		Images:                            loadImageSource(opts, env),
-		StoreBackend:                      firstNonEmpty(env["ATE_API_STORE_BACKEND"], StoreBackendPostgres),
-		StoreBackendSet:                   env["ATE_API_STORE_BACKEND"] != "",
+		StoreBackend:                      storeBackend,
+		StoreBackendSet:                   storeBackendSet,
 		StorePoolMaxConns:                 env["ATE_API_STORE_POOL_MAX_CONNS"],
 		PostgresReadWriteConnectionString: readWriteConnectionString,
 		PostgresOwnerConnectionString:     ownerConnectionString,
@@ -453,7 +483,7 @@ func validateStoreBackend(cfg *Config, env map[string]string) error {
 		conflictPrefix = "ATE_API_MYSQL_"
 	case StoreBackendMySQL:
 		conflictPrefix = "ATE_API_POSTGRES_"
-		if cfg.MySQLReadWriteConnectionString == "" {
+		if !cfg.ExternalStoreSecret && cfg.MySQLReadWriteConnectionString == "" {
 			return fmt.Errorf("ATE_API_STORE_BACKEND=%s requires ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING; "+
 				"there is no bundled MySQL", StoreBackendMySQL)
 		}
@@ -521,6 +551,31 @@ func applyKindDefaults(cfg *Config) {
 func validate(cfg *Config) error {
 	if err := cfg.Images.Validate(); err != nil {
 		return err
+	}
+	switch cfg.Platform {
+	case PlatformGKE, PlatformEKS, PlatformAKS:
+	default:
+		return fmt.Errorf("--platform must be %s, %s, or %s, got %q", PlatformGKE, PlatformEKS, PlatformAKS, cfg.Platform)
+	}
+	if cfg.Kind && cfg.Platform != PlatformGKE {
+		return fmt.Errorf("--kind cannot be combined with --platform=%s", cfg.Platform)
+	}
+	if cfg.Platform == PlatformEKS || cfg.Platform == PlatformAKS {
+		if cfg.S3Region == "" {
+			return fmt.Errorf("--s3-region is required for --platform=%s", cfg.Platform)
+		}
+		if cfg.ExpectedJWTIssuer == "" {
+			return fmt.Errorf("--expected-jwt-issuer is required for --platform=%s", cfg.Platform)
+		}
+	}
+	if cfg.Platform == PlatformAKS && cfg.S3RoleARN == "" {
+		return fmt.Errorf("--s3-role-arn is required for --platform=aks")
+	}
+	if cfg.Platform != PlatformAKS && cfg.S3RoleARN != "" {
+		return fmt.Errorf("--s3-role-arn is only supported for --platform=aks")
+	}
+	if cfg.ExternalStoreSecret && cfg.StoreBackend != StoreBackendMySQL {
+		return fmt.Errorf("ATE_EXTERNAL_STORE_SECRET requires ATE_API_STORE_BACKEND=mysql")
 	}
 	switch cfg.Router {
 	case RouterEnvoy, RouterAgentgateway:
@@ -761,12 +816,16 @@ func (c *Config) ScriptEnv() []string {
 	for name, value := range map[string]string{
 		"KUBECTL_CONTEXT":     c.Context,
 		"KUBECONFIG":          c.kubeconfigEnv,
+		"ATE_PLATFORM":        c.Platform,
 		"BUCKET_NAME":         c.BucketName,
 		"KO_DOCKER_REPO":      c.KODockerRepo,
 		"KO_DEFAULTPLATFORMS": c.KODefaultPlatforms,
 		"PROJECT_ID":          c.ProjectID,
 		"CLUSTER_NAME":        c.ClusterName,
 		"CLUSTER_LOCATION":    c.ClusterLocation,
+		"EXPECTED_JWT_ISSUER": c.ExpectedJWTIssuer,
+		"ATE_S3_REGION":       c.S3Region,
+		"ATE_S3_ROLE_ARN":     c.S3RoleARN,
 		"ATE_OTLP_ENDPOINT":   c.OtlpEndpoint,
 	} {
 		if value == "" {
@@ -777,6 +836,9 @@ func (c *Config) ScriptEnv() []string {
 			continue
 		}
 		merged[name] = value
+	}
+	if c.ExternalStoreSecret {
+		merged["ATE_EXTERNAL_STORE_SECRET"] = "true"
 	}
 
 	if c.RolloutTimeout > 0 {

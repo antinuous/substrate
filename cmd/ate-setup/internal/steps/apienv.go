@@ -15,6 +15,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,10 +37,9 @@ const envHashAnnotation = "ate.dev/env-hash"
 // Secret's server-ca.pem.
 const mysqlServerCAPath = "/run/mysql-server-ca/server-ca.pem"
 
-// CreateAPIServerEnvVars reconciles how ate-api-server reaches its store. The
-// connection strings, the backend selector, and the PostgreSQL schema go into
-// the ate-api-server-secret-envvars Secret, other settings into the ConfigMap,
-// and an external server CA into its own Secret.
+// CreateAPIServerEnvVars reconciles how ate-api-server reaches its store.
+// External MySQL Secret mode validates but does not write the credential
+// Secret.
 //
 // ate-api-server.yaml pulls both in through optional envFrom sources and lists
 // the secretRef last, so the Secret wins over a DSN a previous installer left
@@ -51,6 +51,11 @@ func (e *Env) CreateAPIServerEnvVars(ctx context.Context) error {
 	}
 	if err := e.checkRecordedStoreBackend(ctx); err != nil {
 		return err
+	}
+	if e.Cfg.ExternalStoreSecret {
+		if err := e.validateExternalStoreSecret(ctx); err != nil {
+			return err
+		}
 	}
 
 	var configVars, secretVars map[string]string
@@ -65,8 +70,10 @@ func (e *Env) CreateAPIServerEnvVars(ctx context.Context) error {
 	if err := e.Kube.ApplyConfigMap(ctx, e.Namespace(), ConfigMapAPIEnvVars, configVars); err != nil {
 		return err
 	}
-	if err := e.Kube.ApplySecret(ctx, e.Namespace(), SecretAPIEnvVars, secretVars); err != nil {
-		return err
+	if !e.Cfg.ExternalStoreSecret {
+		if err := e.Kube.ApplySecret(ctx, e.Namespace(), SecretAPIEnvVars, secretVars); err != nil {
+			return err
+		}
 	}
 	if err := e.applyServerCA(ctx, e.Cfg.PostgresServerCAFile, "ATE_API_POSTGRES_SERVER_CA_FILE", SecretPostgresServerCA); err != nil {
 		return err
@@ -75,6 +82,31 @@ func (e *Env) CreateAPIServerEnvVars(ctx context.Context) error {
 		return err
 	}
 	return e.annotateAPIServerEnvHash(ctx)
+}
+
+func (e *Env) validateExternalStoreSecret(ctx context.Context) error {
+	secret, err := e.Kube.GetSecret(ctx, e.Namespace(), SecretAPIEnvVars)
+	if err != nil {
+		return err
+	}
+	if secret == nil {
+		return fmt.Errorf("external MySQL Secret %s/%s is required", e.Namespace(), SecretAPIEnvVars)
+	}
+	for _, key := range []string{
+		envStoreBackend,
+		"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING",
+		"ATE_API_MYSQL_OWNER_CONNECTION_STRING",
+	} {
+		if len(bytes.TrimSpace(secret.Data[key])) == 0 {
+			return fmt.Errorf("external MySQL Secret %s/%s requires non-empty key %s",
+				e.Namespace(), SecretAPIEnvVars, key)
+		}
+	}
+	if string(secret.Data[envStoreBackend]) != config.StoreBackendMySQL {
+		return fmt.Errorf("external MySQL Secret %s/%s must set %s=mysql",
+			e.Namespace(), SecretAPIEnvVars, envStoreBackend)
+	}
+	return nil
 }
 
 // checkRecordedStoreBackend refuses to move a cluster off the backend its
