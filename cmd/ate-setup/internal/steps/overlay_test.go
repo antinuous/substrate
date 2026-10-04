@@ -422,7 +422,7 @@ func TestRenderCordonControlPlane(t *testing.T) {
 		},
 		{
 			name: "agentgateway bundle",
-			cfg:  config.Config{Router: config.RouterAgentgateway},
+			cfg:  config.Config{Platform: config.PlatformGKE, Router: config.RouterAgentgateway},
 			path: func(e *Env) string { return e.Cfg.Path(SystemOverlay(e.Cfg)) },
 			want: []string{"ate-api-server", "ate-controller", "atenet-router"},
 		},
@@ -454,7 +454,7 @@ func TestRenderCordonControlPlane(t *testing.T) {
 		},
 		{
 			name: "agentgateway egress overlay",
-			cfg:  config.Config{Router: config.RouterAgentgateway},
+			cfg:  config.Config{Platform: config.PlatformGKE, Router: config.RouterAgentgateway},
 			path: func(e *Env) string { return e.Cfg.Path(installDir + "/agentgateway-egress") },
 			want: []string{"atenet-egress"},
 		},
@@ -547,8 +547,9 @@ func TestRenderWithoutCordonLeavesManifestsAlone(t *testing.T) {
 // Secret nobody creates.
 func TestAgentgatewayEgressOverlay(t *testing.T) {
 	cfg := &config.Config{
-		Root:   repoRoot(t),
-		Router: config.RouterAgentgateway,
+		Root:     repoRoot(t),
+		Platform: config.PlatformGKE,
+		Router:   config.RouterAgentgateway,
 	}
 	e := &Env{Cfg: cfg, Kube: fakeKube(t)}
 

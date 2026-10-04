@@ -2,6 +2,7 @@
 
 Use `ate-setup deploy ate-system` with `--platform eks` or `--platform aks`.
 GKE remains the default. `--kind` is supported only with GKE.
+EKS and AKS use the Envoy dataplane. `agentgateway` is supported only on GKE.
 
 EKS requires an S3 region and the exact service-account JWT issuer published by
 the cluster. AKS also requires the AWS role ARN used for S3 workload identity.

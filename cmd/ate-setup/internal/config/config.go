@@ -582,6 +582,9 @@ func validate(cfg *Config) error {
 	default:
 		return fmt.Errorf("atenet router must be %s or %s, got %q", RouterEnvoy, RouterAgentgateway, cfg.Router)
 	}
+	if cfg.Router == RouterAgentgateway && cfg.Platform != PlatformGKE {
+		return fmt.Errorf("--atenet-dataplane=agentgateway is only supported on --platform=gke")
+	}
 	if cfg.PodcertWorkersPerSigner < 0 {
 		return fmt.Errorf("--podcert-workers-per-signer must be a positive integer, got %d", cfg.PodcertWorkersPerSigner)
 	}

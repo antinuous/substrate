@@ -29,7 +29,7 @@ a pre-scan pass, so they may appear anywhere on its command line.
 | `--s3-region REGION` | n/a | Region for S3 snapshots; required for EKS and AKS, or set `ATE_S3_REGION` |
 | `--s3-role-arn ARN` | n/a | AKS workload-identity role; required for AKS, or set `ATE_S3_ROLE_ARN` |
 | `--external-store-secret` | n/a | Use the existing MySQL Secret without writing it or passing DSNs; set `ATE_EXTERNAL_STORE_SECRET=true` |
-| `--atenet-dataplane envoy\|agentgateway` | `--atenet-dataplane envoy\|agentgateway` | atenet ingress and egress dataplane (default `envoy`) |
+| `--atenet-dataplane envoy\|agentgateway` | `--atenet-dataplane envoy\|agentgateway` | atenet ingress and egress dataplane; `agentgateway` is supported only on GKE (default `envoy`) |
 | `--rollout-timeout DURATION` | `--rollout-timeout DURATION` | Readiness timeout for workloads (default `60s`). Unlike the shell flag it also governs the podcertificate-controller and CSI waits, which stay at their 120s default until it is passed |
 | `--podcert-workers-per-signer N` | `--podcert-workers-per-signer N` | Concurrent workers per podcertificate-controller signer |
 | `--cluster-size size0\|size10` | `--cluster-size size0\|size10` | Footprint profile (default `size0`). `size10` assumes a dedicated PostgreSQL node: it resizes the bundled StatefulSet and its `postgresql.conf`, pins the apiserver's connection pool, and raises the podcertificate-controller's API rate limits. `ATE_INSTALL_CLUSTER_SIZE` when the flag is absent |

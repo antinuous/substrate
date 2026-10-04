@@ -50,15 +50,8 @@ func SystemOverlay(cfg *config.Config) string {
 	switch {
 	case cfg.Router == config.RouterAgentgateway && cfg.Kind:
 		return installDir + "/kind-agentgateway"
-	case cfg.Router == config.RouterAgentgateway:
-		switch cfg.Platform {
-		case config.PlatformEKS:
-			return installDir + "/eks-agentgateway"
-		case config.PlatformAKS:
-			return installDir + "/aks-agentgateway"
-		default:
-			return installDir + "/agentgateway"
-		}
+	case cfg.Router == config.RouterAgentgateway && cfg.Platform == config.PlatformGKE:
+		return installDir + "/agentgateway"
 	case cfg.Kind:
 		return installDir + "/kind"
 	default:
@@ -158,6 +151,9 @@ func (e *Env) renderSystemManifests(ctx context.Context) ([]byte, error) {
 // selected dataplane.
 func (e *Env) renderAtenetRouterManifest(ctx context.Context) ([]byte, error) {
 	if e.Cfg.Router == config.RouterAgentgateway {
+		if e.Cfg.Platform != config.PlatformGKE {
+			return nil, fmt.Errorf("--atenet-dataplane=agentgateway is only supported on --platform=gke")
+		}
 		return e.renderResolve(ctx, e.Cfg.Path(installDir+"/agentgateway-router"))
 	}
 	return e.renderResolve(ctx, e.Cfg.Manifest("atenet-router.yaml"))
@@ -173,6 +169,9 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context, provider config.Cr
 	general := e.Cfg.AdditionalEgressExtprocService != ""
 
 	if e.Cfg.Router == config.RouterAgentgateway {
+		if e.Cfg.Platform != config.PlatformGKE {
+			return nil, fmt.Errorf("--atenet-dataplane=agentgateway is only supported on --platform=gke")
+		}
 		if general {
 			return nil, fmt.Errorf("--experimental-additional-egress-extproc-service requires --atenet-dataplane=envoy")
 		}

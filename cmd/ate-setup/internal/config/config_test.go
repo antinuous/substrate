@@ -759,6 +759,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"negative rollout timeout", Options{RolloutTimeout: "-30s"}},
 		{"podcert workers", Options{PodcertWorkersPerSigner: -1}},
 		{"cluster size", Options{ClusterSize: "size5"}},
+		{"agentgateway on EKS", Options{Platform: PlatformEKS, Router: RouterAgentgateway, S3Region: "us-east-1", ExpectedJWTIssuer: "issuer"}},
+		{"agentgateway on AKS", Options{Platform: PlatformAKS, Router: RouterAgentgateway, S3Region: "us-east-1", ExpectedJWTIssuer: "issuer", S3RoleARN: "arn:aws:iam::123456789012:role/substrate"}},
 		{"extproc invalid format", Options{AdditionalEgressExtprocService: "extproc:50051"}},
 		{"extproc agentgateway", Options{Router: RouterAgentgateway, AdditionalEgressExtprocService: "ate-system/extproc:50051"}},
 		{"provider not JSON", Options{CredentialProvider: "k8s.io"}},
