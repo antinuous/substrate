@@ -25,9 +25,10 @@ on:
       tag:
         description: 'Existing tag to draft a release for (e.g. v0.3.0)'
         required: true
-# Creating a release needs contents: write.
+# Drafting a release needs contents: write; publishing images needs packages: write.
 permissions:
   contents: write
+  packages: write
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
 jobs:
@@ -37,12 +38,51 @@ jobs:
     - name: Checkout
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
+        ref: ${{ inputs.tag || github.ref }}
         # The committer list is read from local history back to the
         # previous release tag.
         fetch-depth: 0
         persist-credentials: false
+    - name: Set up Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: go.mod
+    - name: Log in to GHCR
+      uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.4.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    - name: Build release images
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: make build-release-images KO_DOCKER_REPO=ghcr.io/antinuous/substrate VERSION="${TAG}"
+    - name: Build ate-setup binaries
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: |
+        mkdir -p dist
+        GOOS=linux GOARCH=amd64 make build-ate-setup VERSION="${TAG}" BINDIR=dist
+        mv dist/ate-setup dist/ate-setup-linux-amd64
+        GOOS=linux GOARCH=arm64 make build-ate-setup VERSION="${TAG}" BINDIR=dist
+        mv dist/ate-setup dist/ate-setup-linux-arm64
+        (cd dist && sha256sum ate-setup-linux-amd64 ate-setup-linux-arm64 > SHA256SUMS)
     - name: Draft release
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag || github.ref_name }}
       run: hack/release/draft-release.sh "${TAG}"
+    - name: Upload ate-setup binaries
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: |
+        if [[ "$(gh release view "${TAG}" --json isDraft --jq '.isDraft')" != true ]]; then
+          echo "release ${TAG} is not a draft" >&2
+          exit 1
+        fi
+        gh release upload "${TAG}" \
+          dist/ate-setup-linux-amd64 \
+          dist/ate-setup-linux-arm64 \
+          dist/SHA256SUMS \
+          --clobber

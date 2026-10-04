@@ -88,7 +88,7 @@ func TestOverlayDiscoveryCoversTheInstaller(t *testing.T) {
 	}
 	for _, kind := range []bool{false, true} {
 		for _, router := range []string{config.RouterEnvoy, config.RouterAgentgateway} {
-			if overlay := SystemOverlay(&config.Config{Kind: kind, Router: router}); overlay != "" {
+			if overlay := SystemOverlay(&config.Config{Kind: kind, Platform: config.PlatformGKE, Router: router}); overlay != "" {
 				want = append(want, filepath.Join(root, overlay))
 			}
 		}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -43,23 +44,50 @@ const cordonControlPlaneComponent = installDir + "/components/cordon-control-pla
 
 // SystemOverlay picks the kustomization for a full control plane install.
 //
-// The choice is a product of two switches: kind vs GKE, and the atenet router
-// dataplane. The plain GKE envoy install renders the base kustomization rather
-// than the raw manifests/ate-install directory: the directory would also
-// re-apply pod-certificate-controller.yaml (reverting the size10 flags and the
-// WORKERS_PER_SIGNER value set earlier in the install), both atenet-egress
-// variants, and the sandboxconfig files, all of which have their own apply
-// steps.
+// The plain GKE envoy install renders the base kustomization rather than the
+// raw manifests/ate-install directory: the directory would also re-apply the
+// pod-certificate controller and resources with their own apply steps.
 func SystemOverlay(cfg *config.Config) string {
 	switch {
 	case cfg.Router == config.RouterAgentgateway && cfg.Kind:
 		return installDir + "/kind-agentgateway"
-	case cfg.Router == config.RouterAgentgateway:
+	case cfg.Router == config.RouterAgentgateway && cfg.Platform == config.PlatformGKE:
 		return installDir + "/agentgateway"
 	case cfg.Kind:
 		return installDir + "/kind"
 	default:
-		return installDir + "/base"
+		switch cfg.Platform {
+		case config.PlatformEKS:
+			return installDir + "/eks"
+		case config.PlatformAKS:
+			return installDir + "/aks"
+		default:
+			return installDir + "/base"
+		}
+	}
+}
+
+func ateletOverlay(cfg *config.Config) string {
+	switch {
+	case cfg.Kind:
+		return installDir + "/kind/atelet"
+	case cfg.Platform == config.PlatformEKS:
+		return installDir + "/eks/atelet"
+	case cfg.Platform == config.PlatformAKS:
+		return installDir + "/aks/atelet"
+	default:
+		return ""
+	}
+}
+
+func apiServerOverlay(cfg *config.Config) string {
+	switch cfg.Platform {
+	case config.PlatformEKS:
+		return installDir + "/eks/ate-api-server"
+	case config.PlatformAKS:
+		return installDir + "/aks/ate-api-server"
+	default:
+		return ""
 	}
 }
 
@@ -124,6 +152,9 @@ func (e *Env) renderSystemManifests(ctx context.Context) ([]byte, error) {
 // selected dataplane.
 func (e *Env) renderAtenetRouterManifest(ctx context.Context) ([]byte, error) {
 	if e.Cfg.Router == config.RouterAgentgateway {
+		if e.Cfg.Platform != config.PlatformGKE {
+			return nil, fmt.Errorf("--atenet-dataplane=agentgateway is only supported on --platform=gke")
+		}
 		return e.renderResolve(ctx, e.Cfg.Path(installDir+"/agentgateway-router"))
 	}
 	return e.renderResolve(ctx, e.Cfg.Manifest("atenet-router.yaml"))
@@ -139,6 +170,9 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context, provider config.Cr
 	general := e.Cfg.AdditionalEgressExtprocService != ""
 
 	if e.Cfg.Router == config.RouterAgentgateway {
+		if e.Cfg.Platform != config.PlatformGKE {
+			return nil, fmt.Errorf("--atenet-dataplane=agentgateway is only supported on --platform=gke")
+		}
 		if general {
 			return nil, fmt.Errorf("--experimental-additional-egress-extproc-service requires --atenet-dataplane=envoy")
 		}
@@ -395,12 +429,64 @@ func (e *Env) otelConfigPath() string {
 
 // applyOtelConfig applies the environment's ate-otel-config ConfigMap.
 func (e *Env) applyOtelConfig(ctx context.Context) error {
+	if e.Cfg.Platform == config.PlatformEKS || e.Cfg.Platform == config.PlatformAKS {
+		data := map[string]string{}
+		if e.Cfg.OtlpEndpoint != "" {
+			data[otelEndpointKey] = e.Cfg.OtlpEndpoint
+		} else {
+			data["OTEL_TRACES_EXPORTER"] = "none"
+			data["OTEL_METRICS_EXPORTER"] = "none"
+			data["OTEL_LOGS_EXPORTER"] = "none"
+		}
+		return e.Kube.ApplyConfigMap(ctx, e.Namespace(), otelConfigMap, data)
+	}
 	return e.Kube.ApplyPath(ctx, e.otelConfigPath())
+}
+
+func (e *Env) applyStorageConfig(ctx context.Context) error {
+	if e.Cfg.Platform != config.PlatformEKS && e.Cfg.Platform != config.PlatformAKS {
+		return nil
+	}
+	data := map[string]string{
+		"ATE_STORAGE_BACKEND": "s3",
+		"AWS_REGION":          e.Cfg.S3Region,
+	}
+	if e.Cfg.Platform == config.PlatformAKS {
+		data["AWS_ROLE_ARN"] = e.Cfg.S3RoleARN
+		data["AWS_WEB_IDENTITY_TOKEN_FILE"] = "/var/run/secrets/sts.amazonaws.com/serviceaccount/token"
+	}
+	existing, err := e.Kube.GetConfigMap(ctx, e.Namespace(), storageConfigMap)
+	if err != nil {
+		return err
+	}
+	if err := e.Kube.ApplyConfigMap(ctx, e.Namespace(), storageConfigMap, data); err != nil {
+		return err
+	}
+	if existing == nil || maps.Equal(existing.Data, data) {
+		return nil
+	}
+
+	now := time.Now()
+	if err := e.Kube.RolloutRestartDeployment(ctx, e.Namespace(), "ate-api-server", now); err != nil {
+		return err
+	}
+	daemonSets, err := e.Kube.DaemonSetNames(ctx, e.Namespace(), "app=atelet")
+	if err != nil {
+		return err
+	}
+	for _, name := range daemonSets {
+		if err := e.Kube.RolloutRestart(ctx, e.Namespace(), name, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // otelConfigMap is the ConfigMap every control plane component reads its
 // telemetry settings from through envFrom.
 const otelConfigMap = "ate-otel-config"
+
+const storageConfigMap = "ate-storage-config"
 
 // otelEndpointKey is the collector address inside it.
 const otelEndpointKey = "OTEL_EXPORTER_OTLP_ENDPOINT"

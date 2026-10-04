@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 	"github.com/agent-substrate/substrate/internal/localca"
 	"github.com/agent-substrate/substrate/internal/localjwtauthority"
@@ -143,14 +144,15 @@ func (e *Env) CreateAPIAuthenticationConfig(ctx context.Context) error {
 // jwtIssuer determines the service account token issuer to trust.
 //
 // ate-api-server accepts a token only if its iss claim equals this string
-// exactly. EXPECTED_JWT_ISSUER, when set, is that string; the rest is for
-// clusters whose issuer follows a standard form — derived from the cluster
-// coordinates on GKE, otherwise read from the cluster's OpenID discovery
-// document, falling back to the in-cluster default.
+// exactly. GKE derives it from cluster coordinates; EKS and AKS require an
+// explicit EXPECTED_JWT_ISSUER.
 func (e *Env) jwtIssuer(ctx context.Context) string {
 	cfg := e.Cfg
 	if cfg.ExpectedJWTIssuer != "" {
 		return cfg.ExpectedJWTIssuer
+	}
+	if cfg.Platform == config.PlatformEKS || cfg.Platform == config.PlatformAKS {
+		return ""
 	}
 	if cfg.ProjectID != "" && cfg.ClusterLocation != "" && cfg.ClusterName != "" {
 		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s",

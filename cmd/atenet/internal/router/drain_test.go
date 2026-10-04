@@ -298,7 +298,7 @@ func TestEnvoyDrainerReachesIPv6OnlyAdmin(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	d := newEnvoyDrainer(net.JoinHostPort("localhost", itoa(ln.Addr().(*net.TCPAddr).Port)))
+	d := newEnvoyDrainer(net.JoinHostPort("::1", itoa(ln.Addr().(*net.TCPAddr).Port)))
 	d.pollInterval = 5 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

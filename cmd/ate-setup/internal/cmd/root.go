@@ -40,9 +40,9 @@ var rootCmd = &cobra.Command{
 secrets and config, and the bundled demos.
 
 Cluster selection follows kubeconfig: pass --context to target a specific
-cluster, or set KUBECTL_CONTEXT. Use --kind for a local Kind cluster, which
-selects the kind manifest overlays, the local image registry, and host-only
-image builds.
+cluster, or set KUBECTL_CONTEXT. Select GKE, EKS, or AKS with --platform
+(default gke). Use --kind for a local Kind cluster, which selects the kind
+manifest overlays, the local image registry, and host-only image builds.
 
 Developer settings are read from .ate-dev-env.sh at the repository root when it
 is present (skipped for --kind, and by NO_DEV_ENV=1).`,
@@ -91,10 +91,11 @@ func Execute() {
 func init() {
 	f := rootCmd.PersistentFlags()
 	f.BoolVar(&opts.Kind, "kind", false,
-		"Target a local Kind cluster: use the kind overlays, the local registry, and host-architecture builds (or ATE_INSTALL_KIND=true)")
+		"Target a local Kind cluster using its overlays, local registry, and host-architecture builds (or ATE_INSTALL_KIND=true)")
+	f.StringVar(&opts.Platform, "platform", "", "Kubernetes platform: gke, eks, or aks (defaults to ATE_PLATFORM or gke; --kind requires gke)")
 	f.StringVar(&opts.Kubeconfig, "kubeconfig", "", "Path to the kubeconfig file")
 	f.StringVar(&opts.Context, "context", "", "Name of the kubeconfig context to use (defaults to KUBECTL_CONTEXT)")
-	f.StringVar(&opts.Router, "atenet-dataplane", "", "Atenet ingress and egress dataplane: envoy or agentgateway (default envoy)")
+	f.StringVar(&opts.Router, "atenet-dataplane", "", "Atenet ingress and egress dataplane: envoy or agentgateway (GKE only; default envoy)")
 	f.StringVar(&opts.RolloutTimeout, "rollout-timeout", "", "Timeout for workload rollouts as a duration string (e.g. 60s, 5m)")
 	f.IntVar(&opts.PodcertWorkersPerSigner, "podcert-workers-per-signer", 0, "Number of worker goroutines per signer in podcertificate-controller")
 	f.StringVar(&opts.ClusterSize, "cluster-size", "",
@@ -110,6 +111,10 @@ func init() {
 			`{"enabled":false} turns injection off; `+
 			`{"name":"<provider>","address":"<host>:<port>"} uses a provider you deploy yourself. A provider requires --atenet-dataplane=envoy`)
 	f.StringVar(&opts.OtlpEndpoint, "otlp-endpoint", "", "Send control plane telemetry to this OTLP collector instead of the cluster default (defaults to ATE_OTLP_ENDPOINT)")
+	f.StringVar(&opts.ExpectedJWTIssuer, "expected-jwt-issuer", "", "Expected service-account JWT issuer (defaults to EXPECTED_JWT_ISSUER; required for EKS and AKS)")
+	f.StringVar(&opts.S3Region, "s3-region", "", "AWS region for S3 snapshots (defaults to ATE_S3_REGION; required for EKS and AKS)")
+	f.StringVar(&opts.S3RoleARN, "s3-role-arn", "", "AWS role ARN for AKS workload identity (defaults to ATE_S3_ROLE_ARN; required for AKS)")
+	f.BoolVar(&opts.ExternalStoreSecret, "external-store-secret", false, "Use the existing ate-api-server-secret-envvars Secret for MySQL credentials (or ATE_EXTERNAL_STORE_SECRET=true)")
 	f.BoolVar(&opts.NoDevEnv, "no-dev-env", false, "Do not source .ate-dev-env.sh")
 
 	f.StringVar(&opts.ImageRepo, "image-repo", "",

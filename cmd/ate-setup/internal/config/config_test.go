@@ -60,6 +60,7 @@ func loadEnv(t *testing.T) {
 		"ATE_API_STORE_POOL_MAX_CONNS",
 		"ATE_ATENET_DATAPLANE",
 		"ATE_CREDENTIAL_PROVIDER",
+		"ATE_EXTERNAL_STORE_SECRET",
 		"ATE_IMAGE_REPO",
 		"ATE_IMAGE_TAG",
 		"ATE_INSTALL_CLUSTER_SIZE",
@@ -68,6 +69,9 @@ func loadEnv(t *testing.T) {
 		"ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER",
 		"ATE_INSTALL_ROLLOUT_TIMEOUT",
 		"ATE_OTLP_ENDPOINT",
+		"ATE_PLATFORM",
+		"ATE_S3_REGION",
+		"ATE_S3_ROLE_ARN",
 		"BENCHMARK_ACTOR_MEMORY",
 		"BUCKET_NAME",
 		"CLUSTER_LOCATION",
@@ -108,6 +112,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Router != RouterEnvoy {
 		t.Errorf("Router = %q, want %q", cfg.Router, RouterEnvoy)
 	}
+	if cfg.Platform != PlatformGKE {
+		t.Errorf("Platform = %q, want %q", cfg.Platform, PlatformGKE)
+	}
 	if cfg.PostgresReadWriteConnectionString != "" || cfg.PostgresOwnerConnectionString != "" {
 		t.Errorf("unexpected external PostgreSQL connections: %q, %q", cfg.PostgresReadWriteConnectionString, cfg.PostgresOwnerConnectionString)
 	}
@@ -125,6 +132,133 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.StoreBackend != StoreBackendPostgres || cfg.StoreBackendSet || cfg.MySQL() {
 		t.Errorf("StoreBackend = %q (set %v), want a defaulted %q", cfg.StoreBackend, cfg.StoreBackendSet, StoreBackendPostgres)
+	}
+}
+
+func TestLoadPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+		env  map[string]string
+		want string
+	}{
+		{name: "GKE default", want: PlatformGKE},
+		{name: "environment", env: map[string]string{"ATE_PLATFORM": PlatformEKS, "ATE_S3_REGION": "us-east-1", "EXPECTED_JWT_ISSUER": "https://issuer.example.com"}, want: PlatformEKS},
+		{name: "flag overrides environment", opts: Options{Platform: PlatformAKS, S3Region: "us-east-1", S3RoleARN: "arn:aws:iam::123456789012:role/aks", ExpectedJWTIssuer: "https://issuer.example.com"}, env: map[string]string{"ATE_PLATFORM": PlatformEKS}, want: PlatformAKS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadEnv(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			cfg, err := Load(tc.opts)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Platform != tc.want {
+				t.Errorf("Platform = %q, want %q", cfg.Platform, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsUnsupportedPlatformAndKindCombination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{name: "unsupported", opts: Options{Platform: "other"}, want: "--platform must be"},
+		{name: "kind with EKS", opts: Options{Kind: true, Platform: PlatformEKS}, want: "--kind cannot be combined"},
+		{name: "kind with AKS", opts: Options{Kind: true, Platform: PlatformAKS}, want: "--kind cannot be combined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadEnv(t)
+			if _, err := Load(tc.opts); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadPlatformRequirements(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "EKS requires region",
+			env:  map[string]string{"ATE_PLATFORM": PlatformEKS, "EXPECTED_JWT_ISSUER": "https://issuer.example.com"},
+			want: "--s3-region is required",
+		},
+		{
+			name: "EKS requires explicit issuer despite GKE coordinates",
+			env: map[string]string{
+				"ATE_PLATFORM":     PlatformEKS,
+				"ATE_S3_REGION":    "us-east-1",
+				"PROJECT_ID":       "gke-project",
+				"CLUSTER_NAME":     "gke-cluster",
+				"CLUSTER_LOCATION": "us-east1",
+			},
+			want: "--expected-jwt-issuer is required",
+		},
+		{
+			name: "AKS requires role ARN",
+			env: map[string]string{
+				"ATE_PLATFORM":        PlatformAKS,
+				"ATE_S3_REGION":       "us-east-1",
+				"EXPECTED_JWT_ISSUER": "https://issuer.example.com",
+			},
+			want: "--s3-role-arn is required",
+		},
+		{
+			name: "AKS requires explicit issuer",
+			env: map[string]string{
+				"ATE_PLATFORM":    PlatformAKS,
+				"ATE_S3_REGION":   "us-east-1",
+				"ATE_S3_ROLE_ARN": "arn:aws:iam::123456789012:role/aks",
+			},
+			want: "--expected-jwt-issuer is required",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadEnv(t)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			if _, err := Load(Options{}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadExternalStoreSecretSelectsMySQLWithoutDSNs(t *testing.T) {
+	loadEnv(t)
+	cfg, err := Load(Options{ExternalStoreSecret: true})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.ExternalStoreSecret || cfg.StoreBackend != StoreBackendMySQL {
+		t.Errorf("external Secret config = %v, backend %q, want MySQL external Secret mode", cfg.ExternalStoreSecret, cfg.StoreBackend)
+	}
+	if cfg.MySQLReadWriteConnectionString != "" || cfg.MySQLOwnerConnectionString != "" {
+		t.Errorf("external Secret mode populated DSN flags: %q, %q", cfg.MySQLReadWriteConnectionString, cfg.MySQLOwnerConnectionString)
+	}
+
+	loadEnv(t)
+	t.Setenv("ATE_EXTERNAL_STORE_SECRET", "true")
+	cfg, err = Load(Options{})
+	if err != nil || !cfg.ExternalStoreSecret || cfg.StoreBackend != StoreBackendMySQL {
+		t.Fatalf("Load() from ATE_EXTERNAL_STORE_SECRET: config = %+v, error = %v", cfg, err)
+	}
+
+	loadEnv(t)
+	t.Setenv("ATE_API_STORE_BACKEND", StoreBackendPostgres)
+	if _, err := Load(Options{ExternalStoreSecret: true}); err == nil ||
+		!strings.Contains(err.Error(), "ATE_EXTERNAL_STORE_SECRET requires ATE_API_STORE_BACKEND=mysql") {
+		t.Fatalf("Load() error = %v, want explicit backend conflict", err)
 	}
 }
 
@@ -447,9 +581,7 @@ func TestLoadRejectsInvalidStoreBackend(t *testing.T) {
 	}
 }
 
-// EXPECTED_JWT_ISSUER overrides the issuer derived from the GKE coordinates,
-// which is how a cluster authenticating against something other than its own
-// OIDC discovery document is installed.
+// EXPECTED_JWT_ISSUER supplies the issuer ate-api-server must trust.
 func TestLoadExpectedJWTIssuer(t *testing.T) {
 	loadEnv(t)
 	const issuer = "https://issuer.example.com"
@@ -627,6 +759,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"negative rollout timeout", Options{RolloutTimeout: "-30s"}},
 		{"podcert workers", Options{PodcertWorkersPerSigner: -1}},
 		{"cluster size", Options{ClusterSize: "size5"}},
+		{"agentgateway on EKS", Options{Platform: PlatformEKS, Router: RouterAgentgateway, S3Region: "us-east-1", ExpectedJWTIssuer: "issuer"}},
+		{"agentgateway on AKS", Options{Platform: PlatformAKS, Router: RouterAgentgateway, S3Region: "us-east-1", ExpectedJWTIssuer: "issuer", S3RoleARN: "arn:aws:iam::123456789012:role/substrate"}},
 		{"extproc invalid format", Options{AdditionalEgressExtprocService: "extproc:50051"}},
 		{"extproc agentgateway", Options{Router: RouterAgentgateway, AdditionalEgressExtprocService: "ate-system/extproc:50051"}},
 		{"provider not JSON", Options{CredentialProvider: "k8s.io"}},

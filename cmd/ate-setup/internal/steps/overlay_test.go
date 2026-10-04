@@ -16,7 +16,9 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -24,11 +26,18 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/images"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 )
 
 // Splicing the provider selection into the real egress manifest replaces the
@@ -420,7 +429,7 @@ func TestRenderCordonControlPlane(t *testing.T) {
 		},
 		{
 			name: "agentgateway bundle",
-			cfg:  config.Config{Router: config.RouterAgentgateway},
+			cfg:  config.Config{Platform: config.PlatformGKE, Router: config.RouterAgentgateway},
 			path: func(e *Env) string { return e.Cfg.Path(SystemOverlay(e.Cfg)) },
 			want: []string{"ate-api-server", "ate-controller", "atenet-router"},
 		},
@@ -452,7 +461,7 @@ func TestRenderCordonControlPlane(t *testing.T) {
 		},
 		{
 			name: "agentgateway egress overlay",
-			cfg:  config.Config{Router: config.RouterAgentgateway},
+			cfg:  config.Config{Platform: config.PlatformGKE, Router: config.RouterAgentgateway},
 			path: func(e *Env) string { return e.Cfg.Path(installDir + "/agentgateway-egress") },
 			want: []string{"atenet-egress"},
 		},
@@ -545,8 +554,9 @@ func TestRenderWithoutCordonLeavesManifestsAlone(t *testing.T) {
 // Secret nobody creates.
 func TestAgentgatewayEgressOverlay(t *testing.T) {
 	cfg := &config.Config{
-		Root:   repoRoot(t),
-		Router: config.RouterAgentgateway,
+		Root:     repoRoot(t),
+		Platform: config.PlatformGKE,
+		Router:   config.RouterAgentgateway,
 	}
 	e := &Env{Cfg: cfg, Kube: fakeKube(t)}
 
@@ -567,6 +577,335 @@ func TestAgentgatewayEgressOverlay(t *testing.T) {
 	}
 	if !exists {
 		t.Errorf("no %s Secret was generated for the agentgateway dataplane", SecretEgressMITMCAPool)
+	}
+}
+
+func TestPlatformInstallOverlays(t *testing.T) {
+	for _, tc := range []struct {
+		platform       string
+		binHostPath    string
+		configHostPath string
+	}{
+		{
+			platform:       config.PlatformEKS,
+			binHostPath:    "/etc/eks/image-credential-provider",
+			configHostPath: "/etc/eks/image-credential-provider/config.json",
+		},
+		{
+			platform:       config.PlatformAKS,
+			binHostPath:    "/var/lib/kubelet/credential-provider",
+			configHostPath: "/var/lib/kubelet/credential-provider-config.yaml",
+		},
+	} {
+		t.Run(tc.platform, func(t *testing.T) {
+			cfg := &config.Config{
+				Root:     repoRoot(t),
+				Platform: tc.platform,
+				Router:   config.RouterEnvoy,
+			}
+			e := &Env{Cfg: cfg}
+
+			system, err := e.Kustomize(SystemOverlay(cfg))
+			if err != nil {
+				t.Fatalf("Kustomize(%q) = %v", SystemOverlay(cfg), err)
+			}
+			resources, err := kube.DecodeManifestBytes(system)
+			if err != nil {
+				t.Fatalf("DecodeManifestBytes(system) = %v", err)
+			}
+			foundAPIServer := false
+			for _, resource := range resources {
+				if resource.GetKind() == "ConfigMap" && resource.GetName() == otelConfigMap {
+					t.Errorf("platform overlay includes the static GKE OTel ConfigMap")
+				}
+				if resource.GetName() == "atenet-router-monitoring" {
+					t.Errorf("platform overlay includes GKE router monitoring")
+				}
+				if resource.GetKind() == "Deployment" && resource.GetName() == "ate-api-server" {
+					foundAPIServer = true
+					if got := resource.GetAnnotations()["secrets.infisical.com/auto-reload"]; got != "true" {
+						t.Errorf("API server auto-reload annotation = %q, want true", got)
+					}
+				}
+				if resource.GetKind() != "Deployment" && resource.GetKind() != "DaemonSet" {
+					continue
+				}
+				wantsStorage := resource.GetKind() == "Deployment" && resource.GetName() == "ate-api-server" ||
+					resource.GetKind() == "DaemonSet" && strings.HasPrefix(resource.GetName(), "atelet-")
+				containers, _, err := unstructured.NestedSlice(resource.Object, "spec", "template", "spec", "containers")
+				if err != nil {
+					t.Fatalf("reading %s containers: %v", resource.GetName(), err)
+				}
+				hasStorage := false
+				for _, container := range containers {
+					containerMap, ok := container.(map[string]any)
+					if !ok {
+						t.Fatalf("%s container has type %T", resource.GetName(), container)
+					}
+					envFrom, _, err := unstructured.NestedSlice(containerMap, "envFrom")
+					if err != nil {
+						t.Fatalf("reading %s envFrom: %v", resource.GetName(), err)
+					}
+					for _, source := range envFrom {
+						sourceMap, ok := source.(map[string]any)
+						if !ok {
+							t.Fatalf("%s envFrom entry has type %T", resource.GetName(), source)
+						}
+						configMap, _, _ := unstructured.NestedMap(sourceMap, "configMapRef")
+						if configMap["name"] == storageConfigMap {
+							hasStorage = true
+						}
+					}
+				}
+				if hasStorage != wantsStorage {
+					t.Errorf("%s storage ConfigMap envFrom = %v, want %v", resource.GetName(), hasStorage, wantsStorage)
+				}
+			}
+			if !foundAPIServer {
+				t.Fatal("platform overlay does not include ate-api-server")
+			}
+			apiServer, err := e.Kustomize(apiServerOverlay(cfg))
+			if err != nil {
+				t.Fatalf("Kustomize(API server overlay) = %v", err)
+			}
+			apiResources, err := kube.DecodeManifestBytes(apiServer)
+			if err != nil {
+				t.Fatalf("DecodeManifestBytes(API server) = %v", err)
+			}
+			foundAPIServer = false
+			for _, resource := range apiResources {
+				if resource.GetKind() == "Deployment" && resource.GetName() == "ate-api-server" {
+					foundAPIServer = true
+					if got := resource.GetAnnotations()["secrets.infisical.com/auto-reload"]; got != "true" {
+						t.Errorf("standalone API server auto-reload annotation = %q, want true", got)
+					}
+				}
+			}
+			if !foundAPIServer {
+				t.Fatal("standalone API server overlay does not render ate-api-server")
+			}
+
+			atelet, err := e.Kustomize(ateletOverlay(cfg))
+			if err != nil {
+				t.Fatalf("Kustomize(atelet overlay) = %v", err)
+			}
+			for _, path := range []string{
+				"mountPath: /run/image-credential-provider/bin",
+				"mountPath: /run/image-credential-provider/config.yaml",
+				"path: " + tc.binHostPath,
+				"path: " + tc.configHostPath,
+			} {
+				if !strings.Contains(string(atelet), path) {
+					t.Errorf("atelet overlay does not contain %q", path)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyStorageConfig(t *testing.T) {
+	const (
+		region  = "us-east-1"
+		roleARN = "arn:aws:iam::123456789012:role/substrate"
+	)
+	wantData := map[string]string{
+		"ATE_STORAGE_BACKEND":         "s3",
+		"AWS_REGION":                  region,
+		"AWS_ROLE_ARN":                roleARN,
+		"AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/sts.amazonaws.com/serviceaccount/token",
+	}
+	atelet := func(name, app string) *appsv1.DaemonSet {
+		return &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: NamespaceAteSystem,
+				Name:      name,
+				Labels:    map[string]string{"app": app},
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		name        string
+		existing    map[string]string
+		wantRestart bool
+	}{
+		{name: "first creation"},
+		{name: "unchanged", existing: wantData},
+		{name: "changed", existing: map[string]string{"ATE_STORAGE_BACKEND": "s3", "AWS_REGION": "us-west-2"}, wantRestart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var existing *corev1.ConfigMap
+			if tc.existing != nil {
+				existing = &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: storageConfigMap},
+					Data:       tc.existing,
+				}
+			}
+			objects := []runtime.Object{
+				apiServerDeployment(),
+				atelet("atelet-v1-2-3", "atelet"),
+				atelet("atelet-v1-2-2", "atelet"),
+				atelet("other-daemonset", "other"),
+			}
+			if existing != nil {
+				objects = append(objects, existing)
+			}
+			clientset := fake.NewSimpleClientset(objects...)
+			clientset.PrependReactor("patch", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+				patchAction, ok := action.(ktesting.PatchAction)
+				if !ok || patchAction.GetPatchType() != types.ApplyPatchType {
+					return false, nil, nil
+				}
+				var cm corev1.ConfigMap
+				if err := json.Unmarshal(patchAction.GetPatch(), &cm); err != nil {
+					return true, nil, err
+				}
+				gvr := corev1.SchemeGroupVersion.WithResource("configmaps")
+				if _, err := clientset.Tracker().Get(gvr, action.GetNamespace(), patchAction.GetName()); err == nil {
+					return false, nil, nil
+				} else if !apierrors.IsNotFound(err) {
+					return true, nil, err
+				}
+				if err := clientset.Tracker().Create(gvr, &cm, action.GetNamespace()); err != nil {
+					return true, nil, err
+				}
+				return true, &cm, nil
+			})
+			e := &Env{
+				Cfg:  &config.Config{Platform: config.PlatformAKS, S3Region: region, S3RoleARN: roleARN},
+				Kube: &kube.Client{Typed: clientset},
+			}
+
+			if err := e.applyStorageConfig(t.Context()); err != nil {
+				t.Fatalf("applyStorageConfig() error = %v", err)
+			}
+			cm, err := e.Kube.GetConfigMap(t.Context(), NamespaceAteSystem, storageConfigMap)
+			if err != nil {
+				t.Fatalf("GetConfigMap() error = %v", err)
+			}
+			if cm == nil || !maps.Equal(cm.Data, wantData) {
+				t.Errorf("storage ConfigMap data = %v, want %v", cm, wantData)
+			}
+			for _, workload := range []struct {
+				kind string
+				name string
+			}{
+				{kind: "deployment", name: "ate-api-server"},
+				{kind: "daemonset", name: "atelet-v1-2-3"},
+				{kind: "daemonset", name: "atelet-v1-2-2"},
+			} {
+				if got := restartedAt(t, e, workload.kind, workload.name); got != tc.wantRestart {
+					t.Errorf("%s/%s restarted = %v, want %v", workload.kind, workload.name, got, tc.wantRestart)
+				}
+			}
+			if restartedAt(t, e, "daemonset", "other-daemonset") {
+				t.Error("a DaemonSet outside app=atelet was restarted")
+			}
+		})
+	}
+
+	t.Run("changed without consumers", func(t *testing.T) {
+		e := &Env{
+			Cfg: &config.Config{Platform: config.PlatformAKS, S3Region: region, S3RoleARN: roleARN},
+			Kube: fakeKube(t, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: storageConfigMap},
+				Data:       map[string]string{"AWS_REGION": "us-west-2"},
+			}),
+		}
+		if err := e.applyStorageConfig(t.Context()); err != nil {
+			t.Fatalf("applyStorageConfig() error = %v", err)
+		}
+	})
+}
+
+func TestApplyPlatformConfigMaps(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		platform    string
+		endpoint    string
+		roleARN     string
+		wantOtel    map[string]string
+		wantStorage map[string]string
+	}{
+		{
+			name:     "EKS disables exporters without an endpoint",
+			platform: config.PlatformEKS,
+			wantOtel: map[string]string{
+				"OTEL_TRACES_EXPORTER":  "none",
+				"OTEL_METRICS_EXPORTER": "none",
+				"OTEL_LOGS_EXPORTER":    "none",
+			},
+			wantStorage: map[string]string{
+				"ATE_STORAGE_BACKEND": "s3",
+				"AWS_REGION":          "us-east-1",
+			},
+		},
+		{
+			name:     "AKS configures the endpoint and web identity",
+			platform: config.PlatformAKS,
+			endpoint: "https://collector.example.com:4317",
+			roleARN:  "arn:aws:iam::123456789012:role/ate-snapshots",
+			wantOtel: map[string]string{otelEndpointKey: "https://collector.example.com:4317"},
+			wantStorage: map[string]string{
+				"ATE_STORAGE_BACKEND":         "s3",
+				"AWS_REGION":                  "us-east-1",
+				"AWS_ROLE_ARN":                "arn:aws:iam::123456789012:role/ate-snapshots",
+				"AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/sts.amazonaws.com/serviceaccount/token",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Env{
+				Cfg: &config.Config{
+					Platform:     tc.platform,
+					OtlpEndpoint: tc.endpoint,
+					S3Region:     "us-east-1",
+					S3RoleARN:    tc.roleARN,
+				},
+				Kube: fakeKube(
+					t,
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: otelConfigMap},
+						Data:       map[string]string{},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Namespace: NamespaceAteSystem, Name: storageConfigMap},
+						Data:       map[string]string{},
+					},
+				),
+			}
+			if err := e.applyOtelConfig(t.Context()); err != nil {
+				t.Fatalf("applyOtelConfig() = %v", err)
+			}
+			otel, err := e.Kube.GetConfigMap(t.Context(), NamespaceAteSystem, otelConfigMap)
+			if err != nil {
+				t.Fatalf("GetConfigMap(OTel) = %v", err)
+			}
+			for key, want := range tc.wantOtel {
+				if got := otel.Data[key]; got != want {
+					t.Errorf("OTel ConfigMap[%q] = %q, want %q", key, got, want)
+				}
+			}
+			if len(otel.Data) != len(tc.wantOtel) {
+				t.Errorf("OTel ConfigMap data = %v, want %v", otel.Data, tc.wantOtel)
+			}
+
+			if err := e.applyStorageConfig(t.Context()); err != nil {
+				t.Fatalf("applyStorageConfig() = %v", err)
+			}
+			storage, err := e.Kube.GetConfigMap(t.Context(), NamespaceAteSystem, storageConfigMap)
+			if err != nil {
+				t.Fatalf("GetConfigMap(storage) = %v", err)
+			}
+			for key, want := range tc.wantStorage {
+				if got := storage.Data[key]; got != want {
+					t.Errorf("storage ConfigMap[%q] = %q, want %q", key, got, want)
+				}
+			}
+			if len(storage.Data) != len(tc.wantStorage) {
+				t.Errorf("storage ConfigMap data = %v, want %v", storage.Data, tc.wantStorage)
+			}
+		})
 	}
 }
 

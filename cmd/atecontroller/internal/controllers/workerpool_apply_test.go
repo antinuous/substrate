@@ -552,7 +552,17 @@ func TestBuildDeploymentApplyConfigOTelEndpoint(t *testing.T) {
 						t.Errorf("%s must be absent without an OTLP endpoint", k)
 					}
 				}
+				for _, k := range []string{"OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER"} {
+					if got, ok := env[k]; !ok || got.value != "none" {
+						t.Errorf("%s = %q, present = %v, want \"none\"", k, got.value, ok)
+					}
+				}
 				return
+			}
+			for _, k := range []string{"OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER"} {
+				if _, ok := env[k]; ok {
+					t.Errorf("%s must be absent with an OTLP endpoint", k)
+				}
 			}
 
 			if got := env["OTEL_EXPORTER_OTLP_ENDPOINT"].value; got != endpoint {
@@ -853,6 +863,9 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 					WithValueFrom(corev1ac.EnvVarSource().
 						WithFieldRef(corev1ac.ObjectFieldSelector().
 							WithFieldPath("metadata.uid"))),
+				corev1ac.EnvVar().WithName("OTEL_TRACES_EXPORTER").WithValue("none"),
+				corev1ac.EnvVar().WithName("OTEL_METRICS_EXPORTER").WithValue("none"),
+				corev1ac.EnvVar().WithName("OTEL_LOGS_EXPORTER").WithValue("none"),
 			).
 			WithVolumeMounts(
 				corev1ac.VolumeMount().

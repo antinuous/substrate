@@ -17,6 +17,7 @@ package serverboot
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,6 +30,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -127,6 +130,56 @@ func TestRelayAttrs(t *testing.T) {
 				t.Errorf("%s = %q, want %q", string(ateattr.OTLPRelayKey), got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInitTracingNoneDoesNotDial(t *testing.T) {
+	t.Setenv(tracesExporterEnv, "none")
+	var dials atomic.Int32
+	conn, err := grpc.NewClient(
+		"passthrough:///trace-exporter",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			dials.Add(1)
+			return nil, errors.New("unexpected trace exporter dial")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	tp, err := InitTracing(context.Background(), TracingOptions{
+		ServiceName:  "trace-disabled",
+		Sampling:     ParentRatioSampling(1),
+		ExporterConn: conn,
+	})
+	if err != nil {
+		t.Fatalf("InitTracing: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	ctx, span := otel.Tracer("trace-disabled-test").Start(context.Background(), "sampled")
+	span.End()
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := tp.ForceFlush(flushCtx); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("OTLP dial count = %d, want 0 when traces exporter is none", got)
+	}
+	if got := otel.GetTracerProvider(); got != tp {
+		t.Errorf("global tracer provider = %T, want initialized provider", got)
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	if got := carrier.Get("traceparent"); got == "" {
+		t.Error("TraceContext propagator was not registered")
 	}
 }
 

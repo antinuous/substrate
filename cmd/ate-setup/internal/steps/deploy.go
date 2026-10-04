@@ -101,6 +101,9 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err := e.EnsureAPIServerPrerequisites(ctx); err != nil {
 		return err
 	}
+	if err := e.applyStorageConfig(ctx); err != nil {
+		return err
+	}
 
 	// The podcertificate controller goes first so it starts signing and
 	// publishing trust bundles immediately.
@@ -299,13 +302,20 @@ func (e *Env) DeployAteAPIServer(ctx context.Context) error {
 	if err := e.EnsureAPIServerPrerequisites(ctx); err != nil {
 		return err
 	}
+	if err := e.applyStorageConfig(ctx); err != nil {
+		return err
+	}
 	if err := e.applyOtelConfig(ctx); err != nil {
 		return err
 	}
 	if err := e.applyOtelEndpointOverride(ctx); err != nil {
 		return err
 	}
-	if err := e.renderResolveApply(ctx, e.Cfg.Manifest("ate-api-server.yaml")); err != nil {
+	apiServerPath := e.Cfg.Manifest("ate-api-server.yaml")
+	if overlay := apiServerOverlay(e.Cfg); overlay != "" {
+		apiServerPath = e.Cfg.Path(overlay)
+	}
+	if err := e.renderResolveApply(ctx, apiServerPath); err != nil {
 		return err
 	}
 	// After the manifest, which resets the pod template to the sidecar-free base.
@@ -344,6 +354,9 @@ func (e *Env) DeployAtelet(ctx context.Context) error {
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
 		return err
 	}
+	if err := e.applyStorageConfig(ctx); err != nil {
+		return err
+	}
 	if err := e.LabelNodesSubstrateVersion(ctx); err != nil {
 		return err
 	}
@@ -356,9 +369,8 @@ func (e *Env) DeployAtelet(ctx context.Context) error {
 
 	var manifest []byte
 	var err error
-	if e.Cfg.Kind {
-		// The kind overlay patches the DaemonSet for the local node layout.
-		manifest, err = e.KustomizeResolve(ctx, installDir+"/kind/atelet")
+	if overlay := ateletOverlay(e.Cfg); overlay != "" {
+		manifest, err = e.renderResolve(ctx, e.Cfg.Path(overlay))
 	} else {
 		manifest, err = e.ResolveManifest(ctx, e.Cfg.Manifest("atelet.yaml"))
 	}

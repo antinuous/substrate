@@ -15,6 +15,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"maps"
@@ -129,6 +130,20 @@ func TestBuildAuthenticationConfig(t *testing.T) {
 				t.Errorf("buildAuthenticationConfig(%q) =\n%q\nwant\n%q", tc.issuer, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestJWTIssuerRequiresExplicitNonGKEIssuer(t *testing.T) {
+	for _, platform := range []string{config.PlatformEKS, config.PlatformAKS} {
+		e := &Env{Cfg: &config.Config{
+			Platform:        platform,
+			ProjectID:       "gke-project",
+			ClusterName:     "gke-cluster",
+			ClusterLocation: "us-east1",
+		}}
+		if got := e.jwtIssuer(context.Background()); got != "" {
+			t.Errorf("jwtIssuer() for %s = %q, want no GKE-derived issuer", platform, got)
+		}
 	}
 }
 

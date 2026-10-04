@@ -459,6 +459,89 @@ func TestCreateAPIServerEnvVarsMySQL(t *testing.T) {
 	}
 }
 
+func TestCreateAPIServerEnvVarsExternalMySQLSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		secret    *corev1.Secret
+		wantError string
+	}{
+		{name: "missing Secret", wantError: "external MySQL Secret"},
+		{
+			name: "missing key",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: SecretAPIEnvVars, Namespace: NamespaceAteSystem},
+				Data: map[string][]byte{
+					envStoreBackend: []byte(config.StoreBackendMySQL),
+					"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING": []byte("sensitive-marker"),
+				},
+			},
+			wantError: "ATE_API_MYSQL_OWNER_CONNECTION_STRING",
+		},
+		{
+			name: "all required keys",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: SecretAPIEnvVars, Namespace: NamespaceAteSystem},
+				Data: map[string][]byte{
+					envStoreBackend: []byte(config.StoreBackendMySQL),
+					"ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING": []byte("read-write-dsn"),
+					"ATE_API_MYSQL_OWNER_CONNECTION_STRING":      []byte("owner-dsn"),
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{
+				StoreBackend:        config.StoreBackendMySQL,
+				StoreBackendSet:     true,
+				ExternalStoreSecret: true,
+				StorePoolMaxConns:   "20",
+			}
+			objects := []runtime.Object{
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: NamespaceAteSystem}},
+				apiServerEnvVarsConfigMap(map[string]string{}),
+			}
+			if tc.secret != nil {
+				objects = append(objects, tc.secret.DeepCopy())
+			}
+			e := &Env{Cfg: &cfg, Kube: fakeKube(t, objects...)}
+
+			err := e.CreateAPIServerEnvVars(t.Context())
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("CreateAPIServerEnvVars() error = %v, want substring %q", err, tc.wantError)
+				}
+				if strings.Contains(err.Error(), "sensitive-marker") {
+					t.Fatal("CreateAPIServerEnvVars() exposed a Secret value in its error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateAPIServerEnvVars() error = %v", err)
+			}
+
+			secret, err := e.Kube.GetSecret(t.Context(), NamespaceAteSystem, SecretAPIEnvVars)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range tc.secret.Data {
+				if got := string(secret.Data[key]); got != string(want) {
+					t.Errorf("external Secret[%q] = %q, want unchanged", key, got)
+				}
+			}
+			cm, err := e.Kube.GetConfigMap(t.Context(), NamespaceAteSystem, ConfigMapAPIEnvVars)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cm.Data["ATE_API_STORE_POOL_MAX_CONNS"] != "20" {
+				t.Errorf("ConfigMap data = %v, want non-secret pool setting", cm.Data)
+			}
+			if _, exists := cm.Data["ATE_API_MYSQL_READ_WRITE_CONNECTION_STRING"]; exists {
+				t.Errorf("ConfigMap data contains a MySQL DSN: %v", cm.Data)
+			}
+		})
+	}
+}
+
 // A redeploy that leaves ATE_API_STORE_BACKEND unset must not move a MySQL
 // install onto an empty bundled PostgreSQL.
 func TestCheckRecordedStoreBackend(t *testing.T) {
